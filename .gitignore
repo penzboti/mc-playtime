@@ -1,0 +1,9 @@
+Cargo.lock
+
+# for keeping exe file but hiding target
+target/*
+
+!target/debug
+target/debug/*
+
+!target/debug/*.exe
