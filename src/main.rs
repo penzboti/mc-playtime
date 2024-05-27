@@ -1,8 +1,10 @@
+//TODO rename saves to worlds
 // found egui here: https://blog.logrocket.com/state-rust-gui-libraries/
 // basic window code from https://github.com/emilk/egui/blob/master/examples/hello_world_simple/src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use std::fs;
+use std::path::PathBuf;
 
 use eframe::egui;
 
@@ -14,50 +16,99 @@ enum State {
     End,
 }
 
-
-// 3 versions of folder checking:
-
-// then after that we search in the statictics
-// do we need both of the uuids in both singleplayer and servers?
-
 fn test() {
-    let (_, folders) = read_folder(&std::path::PathBuf::from(r"C:\Users\penzboti\AppData\Roaming\.minecraft\saves"));
-    folders.iter().for_each(|x| {
-        if is_minecraft_save(x) {
-            println!("Minecraft save found in folder: {:?}", x.file_name().unwrap());
-        }
+    let mut folders = vec![];
+    [
+        "C:/Users/penzboti/AppData/Roaming/ATLauncher/servers",
+        "C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves",
+    ].iter().for_each(|x| {
+        folders.extend(get_minecraft_worlds(&PathBuf::from(x)));
+    });
+    folders.iter().for_each(|path| {
+        let n = get_playtime(path, "".to_owned());
+        println!("Playtime on path {} is {}", path.display(), n);
+        // println!("{}", path.display());
     });
 }
 
-fn is_minecraft_save(path: &std::path::PathBuf) -> bool {
-    // we have to check if it is a valid minecraft generated folder
-    
-    // read the contents beforehand
-    let (files, _folders) = read_folder(path);
-
-    // 3 versions: 
-
-    // 1. .minecraft folder: search for /saves
-    // 2. saves folder: search for in one of the folders a level.dat
-    
-    // 3. a save folder: search for level.dat
-    let level_dat = files.iter().find(|x| x.file_name().unwrap() == "level.dat");
-    match level_dat {
-        Some(_) => true,
-        None => false,
-    }
+fn get_uuid(_name: String) -> (String, String) {
+    ("".to_owned(), "".to_owned())
 }
 
-fn read_folder(path: &std::path::PathBuf) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+// https://minecraft.wiki/w/Statistics
+fn get_playtime(path: &PathBuf, name: String) -> u64 {
+    let (_, folders) = read_folder(path);
+    if !folders.iter().any(|x| x.file_name().unwrap() == "stats") { return 0 }
+    
+    let stats_path = path.join("stats");
+    let (files, _) = read_folder(&stats_path);
+    let uuids = get_uuid(name);
+    // we store it in ticks
+    let mut playtime = 0;
+
+    [uuids.0.clone() + ".json", uuids.1.clone() + ".json"].iter().for_each(|name| {
+        // https://profpatsch.de/notes/rust-string-conversions
+        let is_player = files.iter().any(|x| x.file_name().unwrap().to_os_string().into_string().unwrap() == *name);
+        match is_player {
+            false => {
+                // println!("No player found with name {}", name);
+            },
+            true => {
+                let file_string = fs::read_to_string(name).unwrap();
+                // documentation: https://github.com/serde-rs/json
+                let json: serde_json::Value = serde_json::from_str(&file_string).unwrap();
+                // ticks are 1/20 of a second (normally)
+                let playtime_ticks = json["stats"]["minecraft:custom"]["minecraft:play_time"].as_u64().unwrap_or(0);
+                // legacy playtime
+                let playtime_minute = json["stats"]["minecraft:custom"]["minecraft:play_one_minute"].as_u64().unwrap_or(0);
+                playtime += playtime_ticks + playtime_minute*60*20;
+            },
+        }
+    });
+
+    playtime
+}
+
+fn get_minecraft_worlds(path: &PathBuf) -> Vec<PathBuf> {
+    // we get your inputted path and get all the saves from it
+    // what we return, with all the saves
+    let mut saves: Vec<PathBuf>= vec![];
+    
+    // read the contents beforehand
+    let (_, folders) = read_folder(path);
+
+    //* variations
+    // 1. .minecraft folder: search for /saves
+    if folders.clone().iter().any(|x| x.file_name().unwrap() == "saves") {
+        let saves_path = path.clone().join("saves");
+        saves.extend(get_minecraft_worlds(&saves_path));
+    }
+
+    // 2. saves folder: search for in one of the folders a level.dat
+    // or variation 4: a folder of server folders
+    // or variation 5: a server folder
+    folders.clone().iter().for_each(|f| {
+        saves.extend(get_minecraft_worlds(f));
+    });
+
+    // 3. a save folder: search for level.dat
+    if folders.iter().any(|x| x.file_name().unwrap() == "stats") {
+        saves.push(path.clone());
+    }
+
+    saves
+}
+
+fn read_folder(path: &PathBuf) -> (Vec<PathBuf>, Vec<PathBuf>) {
     // https://stackoverflow.com/questions/26076005/how-can-i-list-files-of-a-directory-in-rust
-    let items = fs::read_dir(path).unwrap().map(|x| x.unwrap().path()).collect::<Vec<std::path::PathBuf>>();
+    let items = fs::read_dir(path).unwrap().map(|x| x.unwrap().path()).collect::<Vec<PathBuf>>();
 
     // into_iter instead of iter
     // it took me so long
     // fount out about it in https://doc.rust-lang.org/std/iter/struct.Map.html
     // explained in https://stackoverflow.com/questions/34733811/what-is-the-difference-between-iter-and-into-iter
-    let files: Vec<std::path::PathBuf> = items.clone().into_iter().filter( |x| x.is_file() ).collect();
-    let folders = items.clone().into_iter().filter( |x| x.is_dir() ).collect::<Vec<std::path::PathBuf>>();
+    let files: Vec<PathBuf> = items.clone().into_iter().filter( |x| x.is_file() ).collect();
+    let folders = items.clone().into_iter().filter( |x| x.is_dir() ).collect::<Vec<PathBuf>>();
     (files, folders)
 }
 
