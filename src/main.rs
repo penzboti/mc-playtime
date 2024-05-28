@@ -1,6 +1,6 @@
+#![warn(dead_code)]
 //TODO rename saves to worlds
-// found egui here: https://blog.logrocket.com/state-rust-gui-libraries/
-// basic window code from https://github.com/emilk/egui/blob/master/examples/hello_world_simple/src/main.rs
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use std::fs;
@@ -8,7 +8,10 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
+// rfd: https://github.com/emilk/egui/discussions/1597
 use rfd::FileDialog;
+
+use md5;
 
 #[derive(PartialEq, Debug)]
 enum State {
@@ -25,14 +28,57 @@ fn test() {
         folders.extend(get_minecraft_worlds(&PathBuf::from(x)));
     });
     folders.iter().for_each(|path| {
-        let n = get_playtime(path, "".to_owned());
-        println!("Playtime on path {} is {}", path.display(), n);
+        let n = get_playtime(path, "penzboti".to_owned());
+        println!("Playtime on path {} is {}", path.clone().display(), n);
         // println!("{}", path.display());
     });
 }
 
-fn get_uuid(_name: String) -> (String, String) {
-    ("".to_owned(), "".to_owned())
+fn get_uuid(name: String) -> (String, String) {
+    // online
+    // api: https://wiki.vg/Mojang_API#Username_to_UUID
+    // working with api in rust: https://rustfordata.com/chapter_3.html
+    let url = format!("https://api.mojang.com/users/profiles/minecraft/{}", name);
+    let ans = reqwest::blocking::get(url).expect("request failed")
+    .text().expect("body failed");
+    let json: serde_json::Value = serde_json::from_str(ans.as_str()).unwrap();
+    let online_raw = json["id"].as_str().unwrap().to_owned();
+    let online = vec![
+        &online_raw[0..8],
+        &online_raw[8..12],
+        &online_raw[12..16],
+        &online_raw[16..20],
+        &online_raw[20..32]
+    ].join("-");
+
+    // offline
+    // found first here: https://gist.github.com/Nikdoge/474f74688b52865bf8d682a97fd4f2fe
+    // then here: https://github.com/nuckle/minecraft-offline-uuid-generator/blob/main/src/js/uuid.js
+    let input = format!("OfflinePlayer:{}", name);
+    let hash = md5::compute(input.as_bytes());
+    // let hashstr = format!("{:x}", hash);
+
+    // let mut byte_array = hashstr.bytes().collect::<Vec<u8>>();
+    let mut byte_array = hash.0;
+
+    byte_array[6] = (byte_array[6] & 0x0f) | 0x30;
+    byte_array[8] = (byte_array[8] & 0x3f) | 0x80;
+
+    let hexstring = byte_array
+    .iter()
+    .map(|byte| format!("{:02x}", byte))
+    .collect::<Vec<String>>()
+    .join("");
+
+    let offline = vec![
+        &hexstring[0..8],
+        &hexstring[8..12],
+        &hexstring[12..16],
+        &hexstring[16..20],
+        &hexstring[20..32]
+    ].join("-");
+
+    (online, offline)
 }
 
 // https://minecraft.wiki/w/Statistics
@@ -42,19 +88,21 @@ fn get_playtime(path: &PathBuf, name: String) -> u64 {
     
     let stats_path = path.join("stats");
     let (files, _) = read_folder(&stats_path);
-    let uuids = get_uuid(name);
+    let uuids = get_uuid(name.clone());
     // we store it in ticks
     let mut playtime = 0;
+
+    let mut is_player_global = false;
 
     [uuids.0.clone() + ".json", uuids.1.clone() + ".json"].iter().for_each(|name| {
         // https://profpatsch.de/notes/rust-string-conversions
         let is_player = files.iter().any(|x| x.file_name().unwrap().to_os_string().into_string().unwrap() == *name);
         match is_player {
-            false => {
-                // println!("No player found with name {}", name);
-            },
+            false => {},
             true => {
-                let file_string = fs::read_to_string(name).unwrap();
+                is_player_global = true;
+                let filepath = stats_path.clone().join(name);
+                let file_string = fs::read_to_string(filepath).unwrap();
                 // documentation: https://github.com/serde-rs/json
                 let json: serde_json::Value = serde_json::from_str(&file_string).unwrap();
                 // ticks are 1/20 of a second (normally)
@@ -66,10 +114,15 @@ fn get_playtime(path: &PathBuf, name: String) -> u64 {
         }
     });
 
+    if !is_player_global {
+        println!("No player found with name {}", name.clone());
+    }
+
     playtime
 }
 
 fn get_minecraft_worlds(path: &PathBuf) -> Vec<PathBuf> {
+    //TODO implement a depth limit
     // we get your inputted path and get all the saves from it
     // what we return, with all the saves
     let mut saves: Vec<PathBuf>= vec![];
@@ -142,6 +195,8 @@ fn main() -> Result<(), eframe::Error> {
 
     let mut state = State::Test;
 
+    // found egui here: https://blog.logrocket.com/state-rust-gui-libraries/
+    // basic window code from https://github.com/emilk/egui/blob/master/examples/hello_world_simple/src/main.rs
     // keep in mind!!: https://stackoverflow.com/a/75716961/12706133
     eframe::run_simple_native("Minecraft Playtime Calculator", options, move |ctx, _frame| {
         egui::CentralPanel::default().show(ctx, |ui| {
