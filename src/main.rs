@@ -1,5 +1,4 @@
-#![warn(dead_code)]
-//TODO rename saves to worlds
+// #![warn(dead_code)]
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
@@ -20,21 +19,37 @@ enum State {
 }
 
 fn test() {
+    let playtimes = handle_playtime(vec![
+        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/servers".to_owned()),
+        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves".to_owned()),
+    ]);
+}
+
+fn handle_playtime(files: Vec<PathBuf>) -> Vec<u64> {
     let mut folders = vec![];
-    [
-        "C:/Users/penzboti/AppData/Roaming/ATLauncher/servers",
-        "C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves",
-    ].iter().for_each(|x| {
-        folders.extend(get_minecraft_worlds(&PathBuf::from(x)));
+    let mut playtime = vec![];
+    files.iter().for_each(|x| {
+        folders.extend(get_minecraft_worlds(&x, 0));
     });
     folders.iter().for_each(|path| {
         let n = get_playtime(path, "penzboti".to_owned());
+        playtime.push(n);
         println!("Playtime on path {} is {}", path.clone().display(), n);
         // println!("{}", path.display());
     });
+    playtime
 }
 
 fn get_uuid(name: String) -> (String, String) {
+    fn split_uuid(raw: String) -> String {
+        vec![
+            &raw[0..8],
+            &raw[8..12],
+            &raw[12..16],
+            &raw[16..20],
+            &raw[20..32]
+        ].join("-")
+    }
     // online
     // api: https://wiki.vg/Mojang_API#Username_to_UUID
     // working with api in rust: https://rustfordata.com/chapter_3.html
@@ -43,40 +58,22 @@ fn get_uuid(name: String) -> (String, String) {
     .text().expect("body failed");
     let json: serde_json::Value = serde_json::from_str(ans.as_str()).unwrap();
     let online_raw = json["id"].as_str().unwrap().to_owned();
-    let online = vec![
-        &online_raw[0..8],
-        &online_raw[8..12],
-        &online_raw[12..16],
-        &online_raw[16..20],
-        &online_raw[20..32]
-    ].join("-");
+    let online = split_uuid(online_raw);
 
     // offline
     // found first here: https://gist.github.com/Nikdoge/474f74688b52865bf8d682a97fd4f2fe
     // then here: https://github.com/nuckle/minecraft-offline-uuid-generator/blob/main/src/js/uuid.js
     let input = format!("OfflinePlayer:{}", name);
     let hash = md5::compute(input.as_bytes());
-    // let hashstr = format!("{:x}", hash);
-
-    // let mut byte_array = hashstr.bytes().collect::<Vec<u8>>();
     let mut byte_array = hash.0;
 
     byte_array[6] = (byte_array[6] & 0x0f) | 0x30;
     byte_array[8] = (byte_array[8] & 0x3f) | 0x80;
-
     let hexstring = byte_array
-    .iter()
-    .map(|byte| format!("{:02x}", byte))
-    .collect::<Vec<String>>()
+        .iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>()
     .join("");
+    let offline = split_uuid(hexstring);
 
-    let offline = vec![
-        &hexstring[0..8],
-        &hexstring[8..12],
-        &hexstring[12..16],
-        &hexstring[16..20],
-        &hexstring[20..32]
-    ].join("-");
 
     (online, offline)
 }
@@ -121,11 +118,13 @@ fn get_playtime(path: &PathBuf, name: String) -> u64 {
     playtime
 }
 
-fn get_minecraft_worlds(path: &PathBuf) -> Vec<PathBuf> {
-    //TODO implement a depth limit
-    // we get your inputted path and get all the saves from it
-    // what we return, with all the saves
-    let mut saves: Vec<PathBuf>= vec![];
+fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<PathBuf> {
+    // stop looking too far into the fs, since we're using recursivity
+    //? we might get away with depth > 3, test it please
+    if depth > 4 {return vec![];}
+
+    // we get your inputted path and get all the worlds from it
+    let mut worlds: Vec<PathBuf>= vec![];
     
     // read the contents beforehand
     let (_, folders) = read_folder(path);
@@ -134,22 +133,22 @@ fn get_minecraft_worlds(path: &PathBuf) -> Vec<PathBuf> {
     // 1. .minecraft folder: search for /saves
     if folders.clone().iter().any(|x| x.file_name().unwrap() == "saves") {
         let saves_path = path.clone().join("saves");
-        saves.extend(get_minecraft_worlds(&saves_path));
+        worlds.extend(get_minecraft_worlds(&saves_path, depth.clone()+1));
     }
 
     // 2. saves folder: search for in one of the folders a level.dat
     // or variation 4: a folder of server folders
     // or variation 5: a server folder
     folders.clone().iter().for_each(|f| {
-        saves.extend(get_minecraft_worlds(f));
+        worlds.extend(get_minecraft_worlds(f, depth.clone()+1));
     });
 
     // 3. a save folder: search for level.dat
     if folders.iter().any(|x| x.file_name().unwrap() == "stats") {
-        saves.push(path.clone());
+        worlds.push(path.clone());
     }
 
-    saves
+    worlds
 }
 
 fn read_folder(path: &PathBuf) -> (Vec<PathBuf>, Vec<PathBuf>) {
