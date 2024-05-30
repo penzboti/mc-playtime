@@ -18,29 +18,90 @@ enum State {
     End,
 }
 
-fn test() {
-    let playtimes = handle_playtime(vec![
-        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/servers".to_owned()),
-        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves".to_owned()),
-    ]);
+#[derive(Debug, Clone)]
+struct Uuids {
+    online: String,
+    offline: String,
 }
 
-fn handle_playtime(files: Vec<PathBuf>) -> Vec<u64> {
+#[derive(PartialEq, Debug, Clone)]
+enum PlayTime {
+    Online(u64),
+    Offline(u64),
+    Mixed(u64),
+    None
+}
+
+#[derive(Debug, Clone)]
+enum GameType {
+    Singleplayer,
+    Multiplayer
+}
+
+#[derive(Debug, Clone)]
+struct World {
+    path: PathBuf,
+    playtime: PlayTime,
+    type_: GameType
+}
+
+fn test() {
+    let worlds = handle_playtime(vec![
+        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/servers".to_owned()),
+        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves".to_owned()),
+    ], "penzboti".to_owned());
+    for world in worlds.iter() {
+        let name = world.path.file_name().unwrap().to_str().unwrap();
+        let parentname = world.path.parent().unwrap().file_name().unwrap().to_str().unwrap();
+        println!("In path {:?}", world.path.display());
+        println!("There is a folder named {}", parentname);
+        println!("The worlds name is {}", name);
+        print!("It is a {:?} world,\nwith ", world.type_);
+        match world.playtime {
+            PlayTime::Online(n) => {
+                println!("{} online playtime", n);
+            },
+            PlayTime::Offline(n) => {
+                println!("{} offline playtime", n);
+            },
+            PlayTime::Mixed(n) => {
+                println!("{} playtime both on offline and online", n);
+            },
+            PlayTime::None => {
+                println!("no playtime");
+            }
+        }
+
+        let playtime = match world.playtime {
+            PlayTime::Online(n) => n,
+            PlayTime::Offline(n) => n,
+            PlayTime::Mixed(n) => n,
+            PlayTime::None => 0
+        };
+        println!("That is {:.2} minutes", playtime as f64/20_f64/60_f64);
+        println!();
+    }
+}
+
+fn handle_playtime(files: Vec<PathBuf>, name: String) -> Vec<World> {
     let mut folders = vec![];
-    let mut playtime = vec![];
+    let uuids = get_uuids(name);
     files.iter().for_each(|x| {
         folders.extend(get_minecraft_worlds(&x, 0));
     });
-    folders.iter().for_each(|path| {
-        let n = get_playtime(path, "penzboti".to_owned());
-        playtime.push(n);
-        println!("Playtime on path {} is {}", path.clone().display(), n);
-        // println!("{}", path.display());
-    });
-    playtime
+    let worlds = folders.iter().map(|world| {
+        World {
+            playtime: get_playtime(world.path.clone(), uuids.clone()),
+            // thought there was a ..world syntax, but there isn't
+            // only when you set defaults
+            path: world.path.clone(),
+            type_: world.type_.clone()
+        }
+    }).collect::<Vec<World>>();
+    worlds
 }
 
-fn get_uuid(name: String) -> (String, String) {
+fn get_uuids(name: String) -> Uuids {
     fn split_uuid(raw: String) -> String {
         vec![
             &raw[0..8],
@@ -63,6 +124,7 @@ fn get_uuid(name: String) -> (String, String) {
     // offline
     // found first here: https://gist.github.com/Nikdoge/474f74688b52865bf8d682a97fd4f2fe
     // then here: https://github.com/nuckle/minecraft-offline-uuid-generator/blob/main/src/js/uuid.js
+    // used chatgpt here
     let input = format!("OfflinePlayer:{}", name);
     let hash = md5::compute(input.as_bytes());
     let mut byte_array = hash.0;
@@ -75,82 +137,86 @@ fn get_uuid(name: String) -> (String, String) {
     let offline = split_uuid(hexstring);
 
 
-    (online, offline)
+    Uuids{online, offline}
 }
 
 // https://minecraft.wiki/w/Statistics
-fn get_playtime(path: &PathBuf, name: String) -> u64 {
-    let (_, folders) = read_folder(path);
-    if !folders.iter().any(|x| x.file_name().unwrap() == "stats") { return 0 }
+fn get_playtime(path: PathBuf, uuids: Uuids) -> PlayTime {
+    let (_, folders) = read_folder(&path);
+    // this shouldn't happen tho
+    if !folders.iter().any(|x| x.file_name().unwrap() == "stats") { return PlayTime::None; }
     
     let stats_path = path.join("stats");
     let (files, _) = read_folder(&stats_path);
-    let uuids = get_uuid(name.clone());
     // we store it in ticks
-    let mut playtime = 0;
+    let mut playtime= PlayTime::None;
 
-    let mut is_player_global = false;
-
-    [uuids.0.clone() + ".json", uuids.1.clone() + ".json"].iter().for_each(|name| {
+    // https://stackoverflow.com/questions/28991050/how-to-iterate-a-vect-with-the-indexed-position
+    [uuids.online.clone() + ".json", uuids.offline.clone() + ".json"].iter().enumerate().for_each(|(i, name)| {
         // https://profpatsch.de/notes/rust-string-conversions
         let is_player = files.iter().any(|x| x.file_name().unwrap().to_os_string().into_string().unwrap() == *name);
-        match is_player {
-            false => {},
-            true => {
-                is_player_global = true;
-                let filepath = stats_path.clone().join(name);
-                let file_string = fs::read_to_string(filepath).unwrap();
-                // documentation: https://github.com/serde-rs/json
-                let json: serde_json::Value = serde_json::from_str(&file_string).unwrap();
-                // ticks are 1/20 of a second (normally)
-                let playtime_ticks = json["stats"]["minecraft:custom"]["minecraft:play_time"].as_u64().unwrap_or(0);
-                // legacy playtime
-                let playtime_minute = json["stats"]["minecraft:custom"]["minecraft:play_one_minute"].as_u64().unwrap_or(0);
-                playtime += playtime_ticks + playtime_minute*60*20;
-            },
+        if is_player {
+            let filepath = stats_path.clone().join(name);
+            let file_string = fs::read_to_string(filepath).unwrap();
+
+            // documentation: https://github.com/serde-rs/json
+            let json: serde_json::Value = serde_json::from_str(&file_string).unwrap();
+            // ticks are 1/20 of a second (normally)
+            let playtime_ticks = json["stats"]["minecraft:custom"]["minecraft:play_time"].as_u64().unwrap_or(0);
+            // legacy playtime
+            let playtime_minute = json["stats"]["minecraft:custom"]["minecraft:play_one_minute"].as_u64().unwrap_or(0);
+
+            let current_playtime = playtime_ticks + playtime_minute*60*20;
+            if current_playtime == 0 { return; }
+            match i {
+                0 => playtime = PlayTime::Online(current_playtime),
+                1 => {
+                    match playtime {
+                        PlayTime::Online(t) => playtime = PlayTime::Mixed(t + current_playtime),
+                        _ => playtime = PlayTime::Offline(current_playtime),
+                    }
+                },
+                _ => {}
+            }
         }
     });
-
-    if !is_player_global {
-        println!("No player found with name {}", name.clone());
-    }
 
     playtime
 }
 
-fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<PathBuf> {
+fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<World> {
     // stop looking too far into the fs, since we're using recursivity
     //? we might get away with depth > 3, test it please
     if depth > 4 {return vec![];}
 
     // we get your inputted path and get all the worlds from it
-    let mut worlds: Vec<PathBuf>= vec![];
+    let mut worlds: Vec<World>= vec![];
     
     // read the contents beforehand
-    let (_, folders) = read_folder(path);
+    let (files, folders) = read_folder(path);
 
-    //* variations
-    // 1. .minecraft folder: search for /saves
-    if folders.clone().iter().any(|x| x.file_name().unwrap() == "saves") {
-        let saves_path = path.clone().join("saves");
-        worlds.extend(get_minecraft_worlds(&saves_path, depth.clone()+1));
-    }
-
-    // 2. saves folder: search for in one of the folders a level.dat
-    // or variation 4: a folder of server folders
-    // or variation 5: a server folder
+    // go down a level, and search for the stats folder
     folders.clone().iter().for_each(|f| {
         worlds.extend(get_minecraft_worlds(f, depth.clone()+1));
     });
 
-    // 3. a save folder: search for level.dat
+    // a stats folder is found, we return the path
     if folders.iter().any(|x| x.file_name().unwrap() == "stats") {
-        worlds.push(path.clone());
+        let mut current = World {
+            path: path.clone(),
+            playtime: PlayTime::None,
+            type_: GameType::Singleplayer
+        };
+        if !files.iter().any(|x| x.file_name().unwrap() == "icon.png") {
+            current.type_ = GameType::Multiplayer;
+        }
+        worlds.push(current);
     }
 
     worlds
 }
 
+//? custom folder struct / enum?
 fn read_folder(path: &PathBuf) -> (Vec<PathBuf>, Vec<PathBuf>) {
     // https://stackoverflow.com/questions/26076005/how-can-i-list-files-of-a-directory-in-rust
     let items = fs::read_dir(path).unwrap().map(|x| x.unwrap().path()).collect::<Vec<PathBuf>>();
