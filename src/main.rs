@@ -1,4 +1,4 @@
-// #![warn(dead_code)]
+#![warn(dead_code)]
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
@@ -12,20 +12,29 @@ use rfd::FileDialog;
 
 use md5;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 enum State {
-    Test,
-    End,
+    Input,
+
+    // you see, we could have made a loading bar, but only with tokio-rs async.
+    // and i dont want to do that
+    // but we still need initiation because rendering is last.
+    // but we cant close the program while loading so tokio would be beneficial but idc
+    LoadingInitiated,
+    Loading,
+    Result,
+    Export,
 }
 
 #[derive(Debug, Clone)]
-struct Uuids {
+struct PlayerUuid {
     online: String,
     offline: String,
 }
 
 #[derive(PartialEq, Debug, Clone)]
 enum PlayTime {
+    // https://doc.rust-lang.org/book/ch06-01-defining-an-enum.html (tuple struct)
     Online(u64),
     Offline(u64),
     Mixed(u64),
@@ -40,68 +49,40 @@ enum GameType {
 
 #[derive(Debug, Clone)]
 struct World {
+    origin: PathBuf,
     path: PathBuf,
     playtime: PlayTime,
-    type_: GameType
+    type_: GameType,
+    active: bool // for exporting
 }
 
-fn test() {
-    let worlds = handle_playtime(vec![
-        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/servers".to_owned()),
-        PathBuf::from("C:/Users/penzboti/AppData/Roaming/ATLauncher/instances/test/saves".to_owned()),
-    ], "penzboti".to_owned());
-    for world in worlds.iter() {
-        let name = world.path.file_name().unwrap().to_str().unwrap();
-        let parentname = world.path.parent().unwrap().file_name().unwrap().to_str().unwrap();
-        println!("In path {:?}", world.path.display());
-        println!("There is a folder named {}", parentname);
-        println!("The worlds name is {}", name);
-        print!("It is a {:?} world,\nwith ", world.type_);
-        match world.playtime {
-            PlayTime::Online(n) => {
-                println!("{} online playtime", n);
-            },
-            PlayTime::Offline(n) => {
-                println!("{} offline playtime", n);
-            },
-            PlayTime::Mixed(n) => {
-                println!("{} playtime both on offline and online", n);
-            },
-            PlayTime::None => {
-                println!("no playtime");
-            }
-        }
-
-        let playtime = match world.playtime {
-            PlayTime::Online(n) => n,
-            PlayTime::Offline(n) => n,
-            PlayTime::Mixed(n) => n,
-            PlayTime::None => 0
-        };
-        println!("That is {:.2} minutes", playtime as f64/20_f64/60_f64);
-        println!();
-    }
+#[derive(Debug, Clone)]
+struct Folder {
+    folders: Vec<PathBuf>,
+    files: Vec<PathBuf>
 }
 
-fn handle_playtime(files: Vec<PathBuf>, name: String) -> Vec<World> {
+fn handle_playtime(input_folders: Vec<PathBuf>, name: String) -> Vec<World> {
     let mut folders = vec![];
     let uuids = get_uuids(name);
-    files.iter().for_each(|x| {
+    input_folders.iter().for_each(|x| {
         folders.extend(get_minecraft_worlds(&x, 0));
     });
     let worlds = folders.iter().map(|world| {
         World {
+            origin: world.origin.clone(),
             playtime: get_playtime(world.path.clone(), uuids.clone()),
             // thought there was a ..world syntax, but there isn't
             // only when you set defaults
             path: world.path.clone(),
-            type_: world.type_.clone()
+            type_: world.type_.clone(),
+            active: true
         }
     }).collect::<Vec<World>>();
     worlds
 }
 
-fn get_uuids(name: String) -> Uuids {
+fn get_uuids(name: String) -> PlayerUuid {
     fn split_uuid(raw: String) -> String {
         vec![
             &raw[0..8],
@@ -137,17 +118,17 @@ fn get_uuids(name: String) -> Uuids {
     let offline = split_uuid(hexstring);
 
 
-    Uuids{online, offline}
+    PlayerUuid{online, offline}
 }
 
 // https://minecraft.wiki/w/Statistics
-fn get_playtime(path: PathBuf, uuids: Uuids) -> PlayTime {
-    let (_, folders) = read_folder(&path);
+fn get_playtime(path: PathBuf, uuids: PlayerUuid) -> PlayTime {
+    let folders = read_folder(&path).folders;
     // this shouldn't happen tho
     if !folders.iter().any(|x| x.file_name().unwrap() == "stats") { return PlayTime::None; }
     
     let stats_path = path.join("stats");
-    let (files, _) = read_folder(&stats_path);
+    let files = read_folder(&stats_path).files;
     // we store it in ticks
     let mut playtime= PlayTime::None;
 
@@ -164,9 +145,10 @@ fn get_playtime(path: PathBuf, uuids: Uuids) -> PlayTime {
             // ticks are 1/20 of a second (normally)
             let playtime_ticks = json["stats"]["minecraft:custom"]["minecraft:play_time"].as_u64().unwrap_or(0);
             // legacy playtime
+            // it seems like it still tracked the playtime in ticks, so the change was just a rename (a thruthful one)
             let playtime_minute = json["stats"]["minecraft:custom"]["minecraft:play_one_minute"].as_u64().unwrap_or(0);
 
-            let current_playtime = playtime_ticks + playtime_minute*60*20;
+            let current_playtime = playtime_ticks + playtime_minute;
             if current_playtime == 0 { return; }
             match i {
                 0 => playtime = PlayTime::Online(current_playtime),
@@ -193,7 +175,9 @@ fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<World> {
     let mut worlds: Vec<World>= vec![];
     
     // read the contents beforehand
-    let (files, folders) = read_folder(path);
+    let read_folder = read_folder(path);
+    let folders = read_folder.folders;
+    let files = read_folder.files;
 
     // go down a level, and search for the stats folder
     folders.clone().iter().for_each(|f| {
@@ -202,10 +186,16 @@ fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<World> {
 
     // a stats folder is found, we return the path
     if folders.iter().any(|x| x.file_name().unwrap() == "stats") {
+        let mut origin = path.clone();
+        for _ in 0..depth {
+            origin = origin.parent().unwrap().to_path_buf();
+        }
         let mut current = World {
+            origin,
             path: path.clone(),
             playtime: PlayTime::None,
-            type_: GameType::Singleplayer
+            type_: GameType::Singleplayer,
+            active: true
         };
         if !files.iter().any(|x| x.file_name().unwrap() == "icon.png") {
             current.type_ = GameType::Multiplayer;
@@ -216,8 +206,7 @@ fn get_minecraft_worlds(path: &PathBuf, depth: u8) -> Vec<World> {
     worlds
 }
 
-//? custom folder struct / enum?
-fn read_folder(path: &PathBuf) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn read_folder(path: &PathBuf) -> Folder {
     // https://stackoverflow.com/questions/26076005/how-can-i-list-files-of-a-directory-in-rust
     let items = fs::read_dir(path).unwrap().map(|x| x.unwrap().path()).collect::<Vec<PathBuf>>();
 
@@ -227,38 +216,109 @@ fn read_folder(path: &PathBuf) -> (Vec<PathBuf>, Vec<PathBuf>) {
     // explained in https://stackoverflow.com/questions/34733811/what-is-the-difference-between-iter-and-into-iter
     let files: Vec<PathBuf> = items.clone().into_iter().filter( |x| x.is_file() ).collect();
     let folders = items.clone().into_iter().filter( |x| x.is_dir() ).collect::<Vec<PathBuf>>();
-    (files, folders)
+    Folder{files, folders}
 }
 
-fn state_test(ui: &mut egui::Ui, state: &mut State) {
-    ui.heading("Test environment");
-    if ui.button("rfd test").clicked() {
+
+fn state_input(ui: &mut egui::Ui, state: &mut State, input_folders: &mut Vec<PathBuf>) {
+    ui.heading("Input");
+    ui.label("you may choose your minecraft folder, save folder, or a world folder. this also applies to server folders.");
+    if ui.button("Select folders").clicked() {
         let folder = FileDialog::new()
-            .set_title("Choose your saves folder")
-            .set_directory("/")
-            .pick_folder();
+            .set_title("Folder selection")
+            .pick_folders();
         match folder {
-            Some(_folder) => test(),
-            None => println!("No files selected"),
+            Some(folder) => input_folders.extend(folder),
+            None => {},
         }
     }
-    if ui.button("End test").clicked() {
-        *state = State::End;
+    if ui.button("Search folders").clicked() {
+        *state = State::LoadingInitiated;
+    }
+
+    let mut removed = false;
+    for i in 0..input_folders.len() {
+        let mut j = i;
+        if removed {j-=1;}
+        let folder = input_folders[j].clone();
+        ui.horizontal(|ui| {
+            if ui.button("X").clicked() {
+                removed = true;
+                input_folders.remove(i);
+            }
+            ui.label(format!("Folder: {}", folder.display()));
+        });
+        
     }
 }
 
-fn state_end(ui: &mut egui::Ui, _state: &mut State) {
-    ui.heading("End of test");
+fn state_loading(ui: &mut egui::Ui, state: &mut State, folders: Vec<PathBuf>, name: String, worlds: &mut Vec<World>) {
+    ui.heading("Loading");
+    ui.label("Loading the playtime data from the selected folders");
+    ui.label("This may take some time");
+    if state == &State::LoadingInitiated {*state = State::Loading;}
+    else {
+        worlds.extend(handle_playtime(folders, name));
+        *state = State::Result;
+    }
+}
+
+fn state_result(ui: &mut egui::Ui, _state: &mut State, worlds: &mut Vec<World>) {
+    ui.heading("Results");
+    // found this here: https://github.com/emilk/egui/issues/296
+    egui::Grid::new("table").show(ui, |ui| {
+        ui.label("Origin");
+        ui.label("Name");
+        ui.label("Type");
+        ui.label("Playtime");
+        ui.label("Active");
+        for world in worlds.iter_mut() {
+            ui.end_row();
+            ui.label(world.origin.file_name().unwrap().to_str().unwrap());
+            ui.label(world.path.file_name().unwrap().to_str().unwrap());
+            ui.label(match world.type_ {
+                GameType::Singleplayer => "Singleplayer",
+                GameType::Multiplayer => "Multiplayer",
+            });
+
+            //* playtime type is only for export
+            let _playtime_type = match world.playtime {
+                PlayTime::Online(_) => "online",
+                PlayTime::Offline(_) => "offline",
+                PlayTime::Mixed(_) => "both offline and online",
+                PlayTime::None => "no",
+            };
+
+            let playtime = match world.playtime {
+                PlayTime::Online(n) => n,
+                PlayTime::Offline(n) => n,
+                PlayTime::Mixed(n) => n,
+                PlayTime::None => 0
+            };
+
+            // found no other way to display this. there is no built in formatting for time
+            let playtime_raw_seconds = playtime /20;
+            let days = playtime_raw_seconds/60/60/24;
+            let hours = playtime_raw_seconds/60/60 - days*24;
+            let minutes = playtime_raw_seconds/60 - hours*60 - days*24*60;
+            let seconds = playtime_raw_seconds - minutes*60 - hours*60*60 - days*24*60*60;
+
+            ui.label(format!("{}d : {}h : {}m : {}s", days, hours, minutes, seconds));
+            ui.checkbox(&mut world.active, "");
+        }
+    });
 }
 
 fn main() -> Result<(), eframe::Error> {
-    test();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 500.0]),
         ..Default::default()
     };
 
-    let mut state = State::Test;
+    let mut state = State::Input;
+
+    let mut input_folders: Vec<PathBuf> = vec![];
+    let mut worlds: Vec<World> = vec![];
 
     // found egui here: https://blog.logrocket.com/state-rust-gui-libraries/
     // basic window code from https://github.com/emilk/egui/blob/master/examples/hello_world_simple/src/main.rs
@@ -266,14 +326,22 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_simple_native("Minecraft Playtime Calculator", options, move |ctx, _frame| {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state, State::Test, "Test");
-                ui.selectable_value(&mut state, State::End, "End");
+                ui.selectable_value(&mut state, State::Input, "Input");
+                if worlds.len() > 0 {
+                    ui.selectable_value(&mut state, State::Result, "Result");
+                    // ui.selectable_value(&mut state, State::Export, "Export");
+                }
             });
             ui.separator();
-            match state {
-                State::Test => state_test(ui, &mut state),
-                State::End => state_end(ui, &mut state),
-            }
+            egui::ScrollArea::both().show(ui, |ui| {
+                match state {
+                    State::Input => state_input(ui, &mut state, &mut input_folders),
+                    State::LoadingInitiated | State::Loading => state_loading(ui, &mut state, input_folders.clone(), "penzboti".to_owned(), &mut worlds),
+                    State::Result => state_result(ui, &mut state, &mut worlds),
+                    // State::Export => state_export(ui, &mut state, worlds.clone()),
+                    _ => {ui.label("This state is not implemented yet");},
+                }
+            });
         });
     })
 }
